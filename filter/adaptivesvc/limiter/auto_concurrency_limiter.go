@@ -23,20 +23,23 @@ type AutoConcurrency struct {
 	maxConcurrency uint64
 
 	// metrics of the current round
-	avgLatency slidingWindow
+	avgLatency *slidingWindow
 
-	inflight atomic.Uint64
+	inflight *atomic.Uint64
 }
 
 func NewAutoConcurrencyLimiter() *AutoConcurrency {
 	return &AutoConcurrency{
-		alpha:          0,
-		emaFactor:      0,
+		alpha:          0.8,
+		emaFactor:      0.75,
 		noLoadLatency:  0,
 		maxQPS:         0,
-		maxConcurrency: 0,
-		avgLatency:     slidingWindow{},
-		inflight:       atomic.Uint64{},
+		maxConcurrency: 8,
+		avgLatency: newSlidingWindow(slidingWindowOpts{
+			Size:           20,
+			BucketDuration: 20000000,
+		}),
+		inflight: atomic.NewUint64(0),
 	}
 }
 func (l *AutoConcurrency) updateNoLoadLatency(latency float64) {
@@ -96,9 +99,9 @@ func (u *AutoConcurrencyUpdater) DoUpdate() error {
 	u.limiter.avgLatency.Add(latency)
 	u.limiter.Lock()
 	defer u.limiter.Unlock()
-	qpms := float64(u.limiter.avgLatency.Value()) * 1000000 / float64(u.limiter.avgLatency.TimespanNs())
+	reqPerMilliseconds := float64(u.limiter.avgLatency.Count()) / float64(u.limiter.avgLatency.TimespanMilliseconds())
 	u.limiter.updateNoLoadLatency(latency)
-	u.limiter.updateQPS(qpms)
+	u.limiter.updateQPS(reqPerMilliseconds)
 	nextMaxConcurrency := u.limiter.maxQPS * ((2+u.limiter.alpha)*u.limiter.noLoadLatency - u.limiter.avgLatency.Avg())
 	u.limiter.updateMaxConcurrency(uint64(nextMaxConcurrency))
 	return nil
@@ -111,7 +114,7 @@ func (u *AutoConcurrencyUpdater) DoUpdate() error {
 type slidingWindow struct {
 	size           int
 	mu             sync.Mutex
-	buckets        []AvgBucket //sum+cnt
+	buckets        []bucket //sum+cnt
 	count          int64
 	avg            float64
 	sum            float64
@@ -120,20 +123,20 @@ type slidingWindow struct {
 	lastAppendTime time.Time
 }
 
-type AvgBucket struct {
+type bucket struct {
 	cnt int64
 	sum float64
 }
 
 // SlidingWindowAvgOpts contains the arguments for creating SlidingWindowCounter.
-type SlidingWindowAvgOpts struct {
+type slidingWindowOpts struct {
 	Size           int
 	BucketDuration time.Duration
 }
 
 // NewSlidingWindowAvg creates a new SlidingWindowCounter based on the given window and SlidingWindowCounterOpts.
-func NewSlidingWindowAvg(opts SlidingWindowAvgOpts) *slidingWindow {
-	buckets := make([]AvgBucket, opts.Size)
+func newSlidingWindow(opts slidingWindowOpts) *slidingWindow {
+	buckets := make([]bucket, opts.Size)
 
 	return &slidingWindow{
 		size:           opts.Size,
@@ -144,69 +147,69 @@ func NewSlidingWindowAvg(opts SlidingWindowAvgOpts) *slidingWindow {
 	}
 }
 
-func (c *slidingWindow) timespan() int {
-	v := int(time.Since(c.lastAppendTime) / c.bucketDuration)
+func (w *slidingWindow) timespan() int {
+	v := int(time.Since(w.lastAppendTime) / w.bucketDuration)
 	if v > -1 { // maybe time backwards
 		return v
 	}
-	return c.size
+	return w.size
 }
 
-func (c *slidingWindow) Add(v float64) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+func (w *slidingWindow) Add(v float64) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 
 	//move offset
-	timespan := c.timespan()
+	timespan := w.timespan()
 	if timespan > 0 {
-		start := (c.offset + 1) % c.size
-		end := (c.offset + timespan) % c.size
+		start := (w.offset + 1) % w.size
+		end := (w.offset + timespan) % w.size
 		// reset the expired buckets
-		c.ResetBuckets(start, timespan)
-		c.offset = end
-		c.lastAppendTime = c.lastAppendTime.Add(time.Duration(timespan * int(c.bucketDuration)))
+		w.ResetBuckets(start, timespan)
+		w.offset = end
+		w.lastAppendTime = w.lastAppendTime.Add(time.Duration(timespan * int(w.bucketDuration)))
 	}
 
-	c.buckets[c.offset].cnt++
-	c.buckets[c.offset].sum += v
+	w.buckets[w.offset].cnt++
+	w.buckets[w.offset].sum += v
 
-	c.sum += v
-	c.count++
-	c.avg = c.sum / float64(c.count)
+	w.sum += v
+	w.count++
+	w.avg = w.sum / float64(w.count)
 }
 
-func (c *slidingWindow) Value() float64 {
-	return c.avg
+func (w *slidingWindow) Value() float64 {
+	return w.avg
 }
 
-func (c *slidingWindow) Count() int64 {
-	return c.count
+func (w *slidingWindow) Count() int64 {
+	return w.count
 }
 
-func (c *slidingWindow) Avg() float64 {
-	return c.avg
+func (w *slidingWindow) Avg() float64 {
+	return w.avg
 }
 
-func (c *slidingWindow) TimespanNs() int64 {
-	return c.bucketDuration.Nanoseconds() * int64(c.size)
+func (w *slidingWindow) TimespanMilliseconds() int64 {
+	return w.bucketDuration.Milliseconds() * int64(w.size)
 }
 
 // ResetBucket empties the bucket based on the given offset.
-func (c *slidingWindow) ResetBucket(offset int) {
-	c.sum -= c.buckets[offset%c.size].sum
-	c.count -= c.buckets[offset%c.size].cnt
-	c.avg = c.sum / float64(c.count)
+func (w *slidingWindow) ResetBucket(offset int) {
+	w.sum -= w.buckets[offset%w.size].sum
+	w.count -= w.buckets[offset%w.size].cnt
+	w.avg = w.sum / float64(w.count)
 
-	c.buckets[offset%c.size].cnt = 0
-	c.buckets[offset%c.size].sum = 0
+	w.buckets[offset%w.size].cnt = 0
+	w.buckets[offset%w.size].sum = 0
 }
 
 // ResetBuckets empties the buckets based on the given offsets.
-func (c *slidingWindow) ResetBuckets(offset int, count int) {
-	if count > c.size {
-		count = c.size
+func (w *slidingWindow) ResetBuckets(offset int, count int) {
+	if count > w.size {
+		count = w.size
 	}
 	for i := 0; i < count; i++ {
-		c.ResetBucket(offset + i)
+		w.ResetBucket(offset + i)
 	}
 }
