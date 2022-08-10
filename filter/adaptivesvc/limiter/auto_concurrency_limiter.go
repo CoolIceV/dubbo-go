@@ -9,15 +9,48 @@ import (
 	"go.uber.org/atomic"
 )
 
-var (
-	_ Limiter = (*AutoConcurrency)(nil)
-	_ Updater = (*AutoConcurrencyUpdater)(nil)
+import (
+	"dubbo.apache.org/dubbo-go/v3/filter/adaptivesvc/limiter/cpu"
 )
+
+var (
+	gCPU  *atomic.Uint64
+	decay         = 0.95
+	_     Limiter = (*AutoConcurrency)(nil)
+	_     Updater = (*AutoConcurrencyUpdater)(nil)
+)
+
+func init() {
+	go cpuproc()
+}
+
+// cpu = cpuᵗ⁻¹ * decay + cpuᵗ * (1 - decay)
+func cpuproc() {
+	ticker := time.NewTicker(time.Millisecond * 500) // same to cpu sample rate
+	defer func() {
+		ticker.Stop()
+		if err := recover(); err != nil {
+			go cpuproc()
+		}
+	}()
+
+	for range ticker.C {
+		usage := cpu.CpuUsage()
+		prevCPU := gCPU.Load()
+		curCPU := uint64(float64(prevCPU)*decay + float64(usage)*(1.0-decay))
+		gCPU.Store(curCPU)
+	}
+}
+
+func (l *AutoConcurrency) CpuUsage() uint64 {
+	return gCPU.Load()
+}
 
 type AutoConcurrency struct {
 	sync.RWMutex
 	alpha          float64 //explore ratio TODO: it should be adjusted heuristically
 	emaFactor      float64
+	CPUThreshold   uint64
 	noLoadLatency  float64 //duration
 	maxQPS         float64
 	maxConcurrency uint64
@@ -35,6 +68,7 @@ func NewAutoConcurrencyLimiter() *AutoConcurrency {
 		noLoadLatency:  0,
 		maxQPS:         0,
 		maxConcurrency: 8,
+		CPUThreshold:   800,
 		avgLatency: newSlidingWindow(slidingWindowOpts{
 			Size:           20,
 			BucketDuration: 20000000,
@@ -42,6 +76,7 @@ func NewAutoConcurrencyLimiter() *AutoConcurrency {
 		inflight: atomic.NewUint64(0),
 	}
 }
+
 func (l *AutoConcurrency) updateNoLoadLatency(latency float64) {
 	if l.noLoadLatency <= 0 {
 		l.noLoadLatency = latency
@@ -76,8 +111,10 @@ func (l *AutoConcurrency) Remaining() uint64 {
 
 func (l *AutoConcurrency) Acquire() (Updater, error) {
 	if l.inflight.Inc() > l.maxConcurrency {
-		l.inflight.Dec()
-		return nil, ErrReachLimitation
+		if l.CpuUsage() >= l.CPUThreshold {
+			l.inflight.Dec()
+			return nil, ErrReachLimitation
+		}
 	}
 	u := &AutoConcurrencyUpdater{
 		startTime: time.Now(),
@@ -102,7 +139,7 @@ func (u *AutoConcurrencyUpdater) DoUpdate() error {
 	reqPerMilliseconds := float64(u.limiter.avgLatency.Count()) / float64(u.limiter.avgLatency.TimespanMilliseconds())
 	u.limiter.updateNoLoadLatency(latency)
 	u.limiter.updateQPS(reqPerMilliseconds)
-	nextMaxConcurrency := u.limiter.maxQPS * ((2+u.limiter.alpha)*u.limiter.noLoadLatency - u.limiter.avgLatency.Avg())
+	nextMaxConcurrency := u.limiter.maxQPS * ((1 + u.limiter.alpha) * u.limiter.noLoadLatency)
 	u.limiter.updateMaxConcurrency(uint64(nextMaxConcurrency))
 	return nil
 }
