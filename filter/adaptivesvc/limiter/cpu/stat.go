@@ -15,7 +15,7 @@ const (
 
 var (
 	stats CPU
-	usage atomic.Uint64
+	usage = atomic.NewUint64(0)
 )
 
 // CPU is cpu stat usage.

@@ -1,6 +1,7 @@
 package limiter
 
 import (
+	"github.com/dubbogo/gost/log/logger"
 	"sync"
 	"time"
 )
@@ -38,6 +39,7 @@ func cpuproc() {
 		usage := cpu.CpuUsage()
 		prevCPU := gCPU.Load()
 		curCPU := uint64(float64(prevCPU)*decay + float64(usage)*(1.0-decay))
+		logger.Debugf("current cpu usage: %d", curCPU)
 		gCPU.Store(curCPU)
 	}
 }
