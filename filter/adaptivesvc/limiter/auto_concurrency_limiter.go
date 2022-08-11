@@ -15,10 +15,10 @@ import (
 )
 
 var (
-	gCPU  *atomic.Uint64
-	decay         = 0.95
-	_     Limiter = (*AutoConcurrency)(nil)
-	_     Updater = (*AutoConcurrencyUpdater)(nil)
+	gCPU  *atomic.Uint64 = atomic.NewUint64(0)
+	decay                = 0.95
+	_     Limiter        = (*AutoConcurrency)(nil)
+	_     Updater        = (*AutoConcurrencyUpdater)(nil)
 )
 
 func init() {
