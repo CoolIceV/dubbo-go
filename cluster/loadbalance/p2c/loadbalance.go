@@ -130,7 +130,7 @@ func Weight(urlI, urlJ *common.URL, methodName string) (weightI, weightJ float64
 }
 
 func norm(x float64) float64 {
-	return x / (x + 1)
+	return 1.5 * x / (x + 1)
 }
 
 func successRateWeight(url *common.URL, methodName string) float64 {

@@ -1,12 +1,13 @@
 package limiter
 
 import (
-	"github.com/dubbogo/gost/log/logger"
 	"sync"
 	"time"
 )
 
 import (
+	"github.com/dubbogo/gost/log/logger"
+
 	"go.uber.org/atomic"
 )
 
