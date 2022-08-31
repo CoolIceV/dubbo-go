@@ -1,6 +1,7 @@
 package limiter
 
 import (
+	"math"
 	"sync"
 	"time"
 )
@@ -74,7 +75,7 @@ func NewAutoConcurrencyLimiter() *AutoConcurrency {
 		CPUThreshold:   800,
 		avgLatency: newSlidingWindow(slidingWindowOpts{
 			Size:           20,
-			BucketDuration: 20000000,
+			BucketDuration: 50000000,
 		}),
 		inflight: atomic.NewUint64(0),
 	}
@@ -135,15 +136,17 @@ func (u *AutoConcurrencyUpdater) DoUpdate() error {
 	defer func() {
 		u.limiter.inflight.Dec()
 	}()
-	latency := float64(time.Now().UnixMilli() - u.startTime.UnixMilli())
+	latency := float64(time.Now().UnixNano()-u.startTime.UnixNano()) / 1e6
 	u.limiter.avgLatency.Add(latency)
 	u.limiter.Lock()
 	defer u.limiter.Unlock()
-	reqPerMilliseconds := float64(u.limiter.avgLatency.Count()) / float64(u.limiter.avgLatency.TimespanMilliseconds())
+	reqPerMilliseconds := float64(u.limiter.avgLatency.MaxCount()) / float64(u.limiter.avgLatency.BucketDuration())
 	u.limiter.updateNoLoadLatency(latency)
 	u.limiter.updateQPS(reqPerMilliseconds)
 	nextMaxConcurrency := u.limiter.maxQPS * ((1 + u.limiter.alpha) * u.limiter.noLoadLatency)
-	u.limiter.updateMaxConcurrency(uint64(nextMaxConcurrency))
+	u.limiter.updateMaxConcurrency(uint64(math.Ceil(nextMaxConcurrency)))
+	logger.Debugf("[Auto Concurrency Limiter] QPMilli: %v, NoLoadLatency: %f, avgLatency: %f, MaxConcurrency: %d",
+		reqPerMilliseconds, u.limiter.noLoadLatency, u.limiter.avgLatency.avg, u.limiter.maxConcurrency)
 	return nil
 }
 
@@ -226,8 +229,22 @@ func (w *slidingWindow) Count() int64 {
 	return w.count
 }
 
+func (w *slidingWindow) MaxCount() int64 {
+	max := int64(0)
+	for _, b := range w.buckets {
+		if max < b.cnt {
+			max = b.cnt
+		}
+	}
+	return max
+}
+
 func (w *slidingWindow) Avg() float64 {
 	return w.avg
+}
+
+func (w *slidingWindow) BucketDuration() int64 {
+	return w.bucketDuration.Milliseconds()
 }
 
 func (w *slidingWindow) TimespanMilliseconds() int64 {
