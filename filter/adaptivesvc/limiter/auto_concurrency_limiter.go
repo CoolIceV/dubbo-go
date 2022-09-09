@@ -63,6 +63,8 @@ type AutoConcurrency struct {
 	avgLatency *slidingWindow
 
 	inflight *atomic.Uint64
+
+	prevDropTime *atomic.Duration
 }
 
 func NewAutoConcurrencyLimiter() *AutoConcurrency {
@@ -72,7 +74,7 @@ func NewAutoConcurrencyLimiter() *AutoConcurrency {
 		noLoadLatency:  0,
 		maxQPS:         0,
 		maxConcurrency: 8,
-		CPUThreshold:   800,
+		CPUThreshold:   600,
 		avgLatency: newSlidingWindow(slidingWindowOpts{
 			Size:           20,
 			BucketDuration: 50000000,
@@ -114,14 +116,31 @@ func (l *AutoConcurrency) Remaining() uint64 {
 }
 
 func (l *AutoConcurrency) Acquire() (Updater, error) {
+	now := time.Now()
 	if l.inflight.Inc() > l.maxConcurrency {
+		drop := false
 		if l.CpuUsage() >= l.CPUThreshold {
+			drop = true
+		}
+		prevDrop := l.prevDropTime.Load()
+		//if prevDrop != 0 {
+		//	// already started drop, return directly
+		//	drop = true
+		//}
+		if time.Duration(now.UnixNano())-prevDrop <= time.Second {
+			drop = true
+		}
+		if drop {
 			l.inflight.Dec()
+			// store start drop time
+			l.prevDropTime.Store(time.Duration(now.Unix()))
 			return nil, ErrReachLimitation
 		}
 	}
+
+	l.prevDropTime.Store(time.Duration(0))
 	u := &AutoConcurrencyUpdater{
-		startTime: time.Now(),
+		startTime: now,
 		limiter:   l,
 	}
 	return u, nil
