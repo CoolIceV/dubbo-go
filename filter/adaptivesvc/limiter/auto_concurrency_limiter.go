@@ -79,7 +79,8 @@ func NewAutoConcurrencyLimiter() *AutoConcurrency {
 			Size:           20,
 			BucketDuration: 50000000,
 		}),
-		inflight: atomic.NewUint64(0),
+		inflight:     atomic.NewUint64(0),
+		prevDropTime: atomic.NewDuration(0),
 	}
 }
 
