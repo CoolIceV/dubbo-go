@@ -130,7 +130,9 @@ func (l *AutoConcurrency) Update(err error, latency int64, samplingTimeUs int64)
 	qps := 1000000.0 * l.SuccessCount / (samplingTimeUs - l.StartTimeUs)
 	l.updateQPS(float64(qps))
 	l.updateNoLoadLatency(float64(avgLatency))
-
+	if l.SuccessCount+l.FailCount < 100 {
+		return
+	}
 	nextMaxConcurrency := uint64(0)
 	if l.NextResetTime <= samplingTimeUs {
 		l.Reset(samplingTimeUs)
