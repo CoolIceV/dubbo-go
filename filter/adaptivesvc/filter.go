@@ -131,7 +131,7 @@ func (f *adaptiveServiceProviderFilter) OnResponse(_ context.Context, result pro
 		return &protocol.RPCResult{Err: ErrUnexpectedUpdaterType}
 	}
 
-	err := updater.DoUpdate()
+	err := updater.DoUpdate(result.Error())
 	if err != nil {
 		logger.Errorf("[adasvc filter] The DoUpdate method was failed, err: %s.", err)
 		return &protocol.RPCResult{Err: err}

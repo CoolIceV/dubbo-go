@@ -44,5 +44,5 @@ type Limiter interface {
 type Updater interface {
 	// DoUpdate is called once an invocation is finished, it tells Updater that the invocation is finished, and please
 	// update the Remaining, Inflight parameters of the Limiter.
-	DoUpdate() error
+	DoUpdate(err error) error
 }
