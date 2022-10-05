@@ -137,7 +137,7 @@ func (l *AutoConcurrency) Update(err error, latency int64, samplingTimeUs int64)
 	if l.NextResetTime <= samplingTimeUs {
 		l.Reset(samplingTimeUs)
 
-		nextMaxConcurrency = uint64(l.maxQPS * l.noLoadLatency / 1000000 * 0.9)
+		nextMaxConcurrency = uint64(math.Ceil(l.maxQPS * l.noLoadLatency / 1000000 * 0.9))
 	} else {
 		//nextMaxConcurrency := u.limiter.maxQPS * ((1 + u.limiter.alpha) * u.limiter.noLoadLatency)
 		if float64(avgLatency) <= l.noLoadLatency*(1.0+MinExploreRatio*1.0) ||
@@ -146,7 +146,7 @@ func (l *AutoConcurrency) Update(err error, latency int64, samplingTimeUs int64)
 		} else {
 			l.ExploreRatio = math.Max(MinExploreRatio, l.ExploreRatio-0.02)
 		}
-		nextMaxConcurrency = uint64(l.noLoadLatency * l.maxQPS / 1000000 * (1 + l.ExploreRatio))
+		nextMaxConcurrency = uint64(math.Ceil(l.noLoadLatency * l.maxQPS / 1000000 * (1 + l.ExploreRatio)))
 	}
 
 	l.maxConcurrency = nextMaxConcurrency
