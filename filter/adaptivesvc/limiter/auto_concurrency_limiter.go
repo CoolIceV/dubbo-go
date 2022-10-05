@@ -126,7 +126,7 @@ func (l *AutoConcurrency) Update(err error, latency int64, samplingTimeUs int64)
 		l.TotalSuccessUs += latency
 	}
 
-	avgLatency := (l.FailCount*1 + l.SuccessCount) / l.SuccessCount
+	avgLatency := (l.TotalFailUs*1 + l.TotalSuccessUs) / l.SuccessCount
 	qps := 1000000.0 * l.SuccessCount / (samplingTimeUs - l.StartTimeUs)
 	l.updateQPS(float64(qps))
 	l.updateNoLoadLatency(float64(avgLatency))
