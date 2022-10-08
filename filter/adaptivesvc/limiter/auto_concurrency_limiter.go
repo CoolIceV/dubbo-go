@@ -1,6 +1,7 @@
 package limiter
 
 import (
+	clsutils "dubbo.apache.org/dubbo-go/v3/cluster/utils"
 	"github.com/dubbogo/gost/log/logger"
 	"math"
 	"math/rand"
@@ -23,6 +24,7 @@ const (
 	SampleWindowSizeMs = 1000
 	MinSampleCount     = 100
 	MaxSampleCount     = 200
+	FailPunishRatio    = 1.0
 )
 
 type AutoConcurrency struct {
@@ -45,6 +47,7 @@ type AutoConcurrency struct {
 	FailCount      int64
 	TotalSuccessUs int64
 	TotalFailUs    int64
+	TotalSuccReq   *atomic.Int64
 
 	inflight *atomic.Uint64
 }
@@ -57,8 +60,10 @@ func NewAutoConcurrencyLimiter() *AutoConcurrency {
 		maxQPS:             -1,
 		maxConcurrency:     40,
 		HalfIntervalMS:     25000,
+		ResetLatencyUs:     0,
 		inflight:           atomic.NewUint64(0),
 		LastSamplingTimeUs: atomic.NewInt64(0),
+		TotalSuccReq:       atomic.NewInt64(0),
 	}
 	l.RemeasureStartUs = l.NextResetTime(time.Now().UnixNano() / 1e3)
 	return l
@@ -118,6 +123,7 @@ func (l *AutoConcurrency) Reset(startTimeUs int64) {
 	l.FailCount = 0
 	l.TotalFailUs = 0
 	l.TotalSuccessUs = 0
+	l.TotalSuccReq.Store(0)
 }
 
 func (l *AutoConcurrency) NextResetTime(samplingTimeUs int64) int64 {
@@ -159,11 +165,12 @@ func (l *AutoConcurrency) Update(err error, latency int64, samplingTimeUs int64)
 	}
 
 	if l.SuccessCount > 0 {
-		avgLatency := (l.TotalFailUs*1 + l.TotalSuccessUs) / l.SuccessCount
-		qps := 1000000.0 * l.SuccessCount / (samplingTimeUs - l.StartTimeUs)
+		totalSuccReq := l.TotalSuccReq.Load()
+		avgLatency := (l.TotalFailUs*FailPunishRatio + l.TotalSuccessUs) / l.SuccessCount
+		qps := 1000000.0 * totalSuccReq / (samplingTimeUs - l.StartTimeUs)
 		l.updateQPS(float64(qps))
 		l.updateNoLoadLatency(float64(avgLatency))
-		logger.Debugf("[Auto Concurrency Limiter] success count: %v, fail count: %v", l.SuccessCount, l.FailCount)
+		logger.Debugf("[Auto Concurrency Limiter] success count: %v, fail count: %v, limiter: %v", l.SuccessCount, l.FailCount, l)
 		nextMaxConcurrency := uint64(0)
 		if l.RemeasureStartUs <= samplingTimeUs {
 			l.Reset(samplingTimeUs)
@@ -185,8 +192,8 @@ func (l *AutoConcurrency) Update(err error, latency int64, samplingTimeUs int64)
 	}
 	l.Reset(samplingTimeUs)
 
-	logger.Debugf("[Auto Concurrency Limiter] Qps: %v, NoLoadLatency: %f, MaxConcurrency: %d",
-		l.maxQPS, l.noLoadLatency, l.maxConcurrency)
+	logger.Debugf("[Auto Concurrency Limiter] Qps: %v, NoLoadLatency: %f, MaxConcurrency: %d, limiter: %v",
+		l.maxQPS, l.noLoadLatency, l.maxConcurrency, l)
 }
 
 type AutoConcurrencyUpdater struct {
@@ -198,7 +205,11 @@ func (u *AutoConcurrencyUpdater) DoUpdate(err error) error {
 	defer func() {
 		u.limiter.inflight.Dec()
 	}()
-
+	if err == nil {
+		u.limiter.TotalSuccReq.Add(1)
+	} else if clsutils.DoesAdaptiveServiceReachLimitation(err) {
+		return nil
+	}
 	now := time.Now().UnixNano() / 1e3
 	lastSamplingTimeUs := u.limiter.LastSamplingTimeUs.Load()
 	if lastSamplingTimeUs == 0 || now-lastSamplingTimeUs >= 100 {
