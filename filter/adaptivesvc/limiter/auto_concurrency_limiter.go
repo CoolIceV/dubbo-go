@@ -18,8 +18,11 @@ var (
 )
 
 const (
-	MaxExploreRatio = 0.3
-	MinExploreRatio = 0.06
+	MaxExploreRatio    = 0.3
+	MinExploreRatio    = 0.06
+	SampleWindowSizeMs = 1000
+	MinSampleCount     = 100
+	MaxSampleCount     = 200
 )
 
 type AutoConcurrency struct {
@@ -33,14 +36,17 @@ type AutoConcurrency struct {
 	maxConcurrency uint64
 	//CorrectionFactor float64
 	// metrics of the current round
-	StartTimeUs    int64
+	StartTimeUs        int64
+	LastSamplingTimeUs *atomic.Int64
+	ResetLatencyUs     int64
+	RemeasureStartUs   int64
+
 	SuccessCount   int64
 	FailCount      int64
 	TotalSuccessUs int64
 	TotalFailUs    int64
 
-	NextResetTime int64
-	inflight      *atomic.Uint64
+	inflight *atomic.Uint64
 }
 
 func NewAutoConcurrencyLimiter() *AutoConcurrency {
@@ -105,18 +111,33 @@ func (l *AutoConcurrency) Acquire() (Updater, error) {
 }
 
 func (l *AutoConcurrency) Reset(startTimeUs int64) {
-	l.Lock()
-	defer l.Unlock()
 	l.StartTimeUs = startTimeUs
 	l.SuccessCount = 0
 	l.FailCount = 0
 	l.TotalFailUs = 0
 	l.TotalSuccessUs = 0
-	l.NextResetTime = startTimeUs + (l.HalfIntervalMS+rand.Int63n(l.HalfIntervalMS))*1000
 }
+
+func (l *AutoConcurrency) NextResetTime(samplingTimeUs int64) int64 {
+	return samplingTimeUs + (l.HalfIntervalMS+rand.Int63n(l.HalfIntervalMS))*1000
+}
+
 func (l *AutoConcurrency) Update(err error, latency int64, samplingTimeUs int64) {
 	l.Lock()
 	defer l.Unlock()
+	if l.ResetLatencyUs != 0 {
+		if l.ResetLatencyUs > samplingTimeUs {
+			return
+		}
+		l.noLoadLatency = -1
+		l.ResetLatencyUs = 0
+		l.RemeasureStartUs = l.NextResetTime(samplingTimeUs)
+		l.Reset(samplingTimeUs)
+	}
+
+	if l.StartTimeUs == 0 {
+		l.StartTimeUs = samplingTimeUs
+	}
 
 	if err != nil {
 		l.FailCount++
@@ -125,35 +146,45 @@ func (l *AutoConcurrency) Update(err error, latency int64, samplingTimeUs int64)
 		l.SuccessCount++
 		l.TotalSuccessUs += latency
 	}
-
-	avgLatency := (l.TotalFailUs*1 + l.TotalSuccessUs) / l.SuccessCount
-	qps := 1000000.0 * l.SuccessCount / (samplingTimeUs - l.StartTimeUs)
-	l.updateQPS(float64(qps))
-	l.updateNoLoadLatency(float64(avgLatency))
-	logger.Debugf("[Auto Concurrency Limiter] success count: %v, fail count: %v", l.SuccessCount, l.FailCount)
-	if l.SuccessCount+l.FailCount < 50 {
+	if l.SuccessCount+l.FailCount < MinSampleCount {
+		if samplingTimeUs-l.StartTimeUs >= SampleWindowSizeMs*1000 {
+			l.Reset(samplingTimeUs)
+		}
 		return
 	}
-	nextMaxConcurrency := uint64(0)
-	if l.NextResetTime <= samplingTimeUs {
-		l.Reset(samplingTimeUs)
-
-		nextMaxConcurrency = uint64(math.Ceil(l.maxQPS * l.noLoadLatency / 1000000 * 0.9))
-	} else {
-		//nextMaxConcurrency := u.limiter.maxQPS * ((1 + u.limiter.alpha) * u.limiter.noLoadLatency)
-		if float64(avgLatency) <= l.noLoadLatency*(1.0+MinExploreRatio*1.0) ||
-			float64(qps) <= l.maxQPS/(1.0+MinExploreRatio) {
-			l.ExploreRatio = math.Min(MaxExploreRatio, l.ExploreRatio+0.02)
-		} else {
-			l.ExploreRatio = math.Max(MinExploreRatio, l.ExploreRatio-0.02)
-		}
-		nextMaxConcurrency = uint64(math.Ceil(l.noLoadLatency * l.maxQPS / 1000000 * (1 + l.ExploreRatio)))
+	if samplingTimeUs-l.StartTimeUs < SampleWindowSizeMs*1000 && l.SuccessCount+l.FailCount < MaxSampleCount {
+		return
 	}
 
-	l.maxConcurrency = nextMaxConcurrency
+	if l.SuccessCount > 0 {
+		avgLatency := (l.TotalFailUs*1 + l.TotalSuccessUs) / l.SuccessCount
+		qps := 1000000.0 * l.SuccessCount / (samplingTimeUs - l.StartTimeUs)
+		l.updateQPS(float64(qps))
+		l.updateNoLoadLatency(float64(avgLatency))
+		logger.Debugf("[Auto Concurrency Limiter] success count: %v, fail count: %v", l.SuccessCount, l.FailCount)
+		nextMaxConcurrency := uint64(0)
+		if l.RemeasureStartUs <= samplingTimeUs {
+			l.Reset(samplingTimeUs)
+			l.ResetLatencyUs = samplingTimeUs + avgLatency*2
+			nextMaxConcurrency = uint64(math.Ceil(l.maxQPS * l.noLoadLatency / 1000000 * 0.9))
+		} else {
+			//nextMaxConcurrency := u.limiter.maxQPS * ((1 + u.limiter.alpha) * u.limiter.noLoadLatency)
+			if float64(avgLatency) <= l.noLoadLatency*(1.0+MinExploreRatio*1.0) ||
+				float64(qps) <= l.maxQPS/(1.0+MinExploreRatio) {
+				l.ExploreRatio = math.Min(MaxExploreRatio, l.ExploreRatio+0.02)
+			} else {
+				l.ExploreRatio = math.Max(MinExploreRatio, l.ExploreRatio-0.02)
+			}
+			nextMaxConcurrency = uint64(math.Ceil(l.noLoadLatency * l.maxQPS / 1000000 * (1 + l.ExploreRatio)))
+		}
+		l.maxConcurrency = nextMaxConcurrency
+	} else {
+		l.maxConcurrency /= 2
+	}
+	l.Reset(samplingTimeUs)
+
 	logger.Debugf("[Auto Concurrency Limiter] Qps: %v, NoLoadLatency: %f, MaxConcurrency: %d",
 		l.maxQPS, l.noLoadLatency, l.maxConcurrency)
-
 }
 
 type AutoConcurrencyUpdater struct {
@@ -167,8 +198,14 @@ func (u *AutoConcurrencyUpdater) DoUpdate(err error) error {
 	}()
 
 	now := time.Now().UnixNano() / 1e3
-	latency := now - u.startTime.UnixNano()/1e3
-	u.limiter.Update(err, latency, now)
+	lastSamplingTimeUs := u.limiter.LastSamplingTimeUs.Load()
+	if lastSamplingTimeUs == 0 || now-lastSamplingTimeUs >= 100 {
+		sample := u.limiter.LastSamplingTimeUs.CAS(lastSamplingTimeUs, now)
+		if sample {
+			latency := now - u.startTime.UnixNano()/1e3
+			u.limiter.Update(err, latency, now)
+		}
+	}
 
 	return nil
 }
