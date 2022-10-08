@@ -1,7 +1,6 @@
 package limiter
 
 import (
-	clsutils "dubbo.apache.org/dubbo-go/v3/cluster/utils"
 	"github.com/dubbogo/gost/log/logger"
 	"math"
 	"math/rand"
@@ -207,8 +206,6 @@ func (u *AutoConcurrencyUpdater) DoUpdate(err error) error {
 	}()
 	if err == nil {
 		u.limiter.TotalSuccReq.Add(1)
-	} else if clsutils.DoesAdaptiveServiceReachLimitation(err) {
-		return nil
 	}
 	now := time.Now().UnixNano() / 1e3
 	lastSamplingTimeUs := u.limiter.LastSamplingTimeUs.Load()
