@@ -51,15 +51,16 @@ type AutoConcurrency struct {
 
 func NewAutoConcurrencyLimiter() *AutoConcurrency {
 	l := &AutoConcurrency{
+		ExploreRatio:       MaxExploreRatio,
 		emaFactor:          0.1,
-		noLoadLatency:      0,
-		maxQPS:             0,
+		noLoadLatency:      -1,
+		maxQPS:             -1,
 		maxConcurrency:     40,
 		HalfIntervalMS:     25000,
 		inflight:           atomic.NewUint64(0),
 		LastSamplingTimeUs: atomic.NewInt64(0),
 	}
-	l.Reset(time.Now().UnixNano() / 1e3)
+	l.RemeasureStartUs = l.NextResetTime(time.Now().UnixNano() / 1e3)
 	return l
 }
 
