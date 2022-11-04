@@ -21,7 +21,7 @@ const (
 	MaxExploreRatio    = 0.3
 	MinExploreRatio    = 0.06
 	SampleWindowSizeMs = 1000
-	MinSampleCount     = 100
+	MinSampleCount     = 40
 	MaxSampleCount     = 200
 	FailPunishRatio    = 1.0
 )
