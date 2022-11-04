@@ -169,7 +169,7 @@ func (l *AutoConcurrency) Update(err error, latency int64, samplingTimeUs int64)
 		qps := 1000000.0 * totalSuccReq / (samplingTimeUs - l.StartTimeUs)
 		l.updateQPS(float64(qps))
 		l.updateNoLoadLatency(float64(avgLatency))
-		logger.Debugf("[Auto Concurrency Limiter] success count: %v, fail count: %v, limiter: %v", l.SuccessCount, l.FailCount, l)
+		logger.Debugf("[Auto Concurrency Limiter] success count: %v, fail count: %v, limiter: %+v", l.SuccessCount, l.FailCount, l)
 		nextMaxConcurrency := uint64(0)
 		if l.RemeasureStartUs <= samplingTimeUs {
 			l.Reset(samplingTimeUs)
@@ -212,6 +212,7 @@ func (u *AutoConcurrencyUpdater) DoUpdate(err error) error {
 	if lastSamplingTimeUs == 0 || now-lastSamplingTimeUs >= 100 {
 		sample := u.limiter.LastSamplingTimeUs.CAS(lastSamplingTimeUs, now)
 		if sample {
+			logger.Debugf("[Auto Concurrency Updater] sample, %v, %v", u.limiter.ResetLatencyUs, u.limiter.RemeasureStartUs)
 			latency := now - u.startTime.UnixNano()/1e3
 			u.limiter.Update(err, latency, now)
 		}
