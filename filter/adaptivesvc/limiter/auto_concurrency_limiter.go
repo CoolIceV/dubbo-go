@@ -183,6 +183,9 @@ func (l *AutoConcurrency) Update(err error, latency int64, samplingTimeUs int64)
 		l.SuccessCount++
 		l.TotalSuccessUs += latency
 	}
+
+	logger.Debugf("[Auto Concurrency Limiter Test] samplingTimeUs: %v, StartTimeUs: %v", samplingTimeUs, l.StartTimeUs)
+
 	if l.SuccessCount+l.FailCount < MinSampleCount {
 		if samplingTimeUs-l.StartTimeUs >= SampleWindowSizeMs*1000 {
 			l.Reset(samplingTimeUs)
@@ -222,7 +225,7 @@ func (l *AutoConcurrency) Update(err error, latency int64, samplingTimeUs int64)
 	} else {
 		l.maxConcurrency /= 2
 	}
-	l.Reset(samplingTimeUs)
+	//l.Reset(samplingTimeUs)
 
 	logger.Debugf("[Auto Concurrency Limiter] Qps: %v, NoLoadLatency: %f, MaxConcurrency: %d, limiter: %+v",
 		l.maxQPS, l.noLoadLatency, l.maxConcurrency, l)
