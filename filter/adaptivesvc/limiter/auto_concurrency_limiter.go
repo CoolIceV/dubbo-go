@@ -159,6 +159,9 @@ func (l *AutoConcurrency) Update(err error, latency int64, samplingTimeUs int64)
 		}
 		return
 	}
+
+	logger.Debugf("[Auto Concurrency Limiter Test] samplingTimeUs: %v, StartTimeUs: %v", samplingTimeUs, l.StartTimeUs)
+
 	if samplingTimeUs-l.StartTimeUs < SampleWindowSizeMs*1000 && l.SuccessCount+l.FailCount < MaxSampleCount {
 		return
 	}
@@ -183,7 +186,7 @@ func (l *AutoConcurrency) Update(err error, latency int64, samplingTimeUs int64)
 			} else {
 				l.ExploreRatio = math.Max(MinExploreRatio, l.ExploreRatio-0.02)
 			}
-			nextMaxConcurrency = uint64(math.Ceil(l.noLoadLatency * l.maxQPS / 1000000 * (1 + l.ExploreRatio)))
+			nextMaxConcurrency = uint64(math.Ceil(l.noLoadLatency * l.maxQPS * (1 + l.ExploreRatio) / 1000000))
 		}
 		l.maxConcurrency = nextMaxConcurrency
 	} else {
@@ -191,7 +194,7 @@ func (l *AutoConcurrency) Update(err error, latency int64, samplingTimeUs int64)
 	}
 	l.Reset(samplingTimeUs)
 
-	logger.Debugf("[Auto Concurrency Limiter] Qps: %v, NoLoadLatency: %f, MaxConcurrency: %d, limiter: %v",
+	logger.Debugf("[Auto Concurrency Limiter] Qps: %v, NoLoadLatency: %f, MaxConcurrency: %d, limiter: %+v",
 		l.maxQPS, l.noLoadLatency, l.maxConcurrency, l)
 }
 
