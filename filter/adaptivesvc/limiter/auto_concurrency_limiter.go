@@ -1,6 +1,7 @@
 package limiter
 
 import (
+	"dubbo.apache.org/dubbo-go/v3/filter/adaptivesvc/limiter/cpu"
 	"github.com/dubbogo/gost/log/logger"
 	"math"
 	"math/rand"
@@ -13,8 +14,10 @@ import (
 )
 
 var (
-	_ Limiter = (*AutoConcurrency)(nil)
-	_ Updater = (*AutoConcurrencyUpdater)(nil)
+	_     Limiter        = (*AutoConcurrency)(nil)
+	_     Updater        = (*AutoConcurrencyUpdater)(nil)
+	gCPU  *atomic.Uint64 = atomic.NewUint64(0)
+	decay                = 0.95
 )
 
 const (
@@ -49,6 +52,33 @@ type AutoConcurrency struct {
 	TotalSuccReq   *atomic.Int64
 
 	inflight *atomic.Uint64
+}
+
+func init() {
+	go cpuproc()
+}
+
+// cpu = cpuᵗ⁻¹ * decay + cpuᵗ * (1 - decay)
+func cpuproc() {
+	ticker := time.NewTicker(time.Millisecond * 500) // same to cpu sample rate
+	defer func() {
+		ticker.Stop()
+		if err := recover(); err != nil {
+			go cpuproc()
+		}
+	}()
+
+	for range ticker.C {
+		usage := cpu.CpuUsage()
+		prevCPU := gCPU.Load()
+		curCPU := uint64(float64(prevCPU)*decay + float64(usage)*(1.0-decay))
+		logger.Debugf("current cpu usage: %d", curCPU)
+		gCPU.Store(curCPU)
+	}
+}
+
+func (l *AutoConcurrency) CpuUsage() uint64 {
+	return gCPU.Load()
 }
 
 func NewAutoConcurrencyLimiter() *AutoConcurrency {
@@ -104,7 +134,7 @@ func (l *AutoConcurrency) Remaining() uint64 {
 
 func (l *AutoConcurrency) Acquire() (Updater, error) {
 	now := time.Now()
-	if l.inflight.Inc() > l.maxConcurrency {
+	if l.inflight.Inc() > l.maxConcurrency && l.CpuUsage() >= 500 {
 		l.inflight.Dec()
 		return nil, ErrReachLimitation
 	}
