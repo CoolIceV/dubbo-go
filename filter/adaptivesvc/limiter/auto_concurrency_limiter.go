@@ -25,7 +25,7 @@ const (
 	MinExploreRatio    = 0.06
 	SampleWindowSizeMs = 1000
 	MinSampleCount     = 40
-	MaxSampleCount     = 200
+	MaxSampleCount     = 500
 	FailPunishRatio    = 1.0
 )
 
@@ -52,6 +52,8 @@ type AutoConcurrency struct {
 	TotalSuccReq   *atomic.Int64
 
 	inflight *atomic.Uint64
+
+	prevDropTime *atomic.Duration
 }
 
 func init() {
@@ -93,6 +95,7 @@ func NewAutoConcurrencyLimiter() *AutoConcurrency {
 		inflight:           atomic.NewUint64(0),
 		LastSamplingTimeUs: atomic.NewInt64(0),
 		TotalSuccReq:       atomic.NewInt64(0),
+		prevDropTime:       atomic.NewDuration(0),
 	}
 	l.RemeasureStartUs = l.NextResetTime(time.Now().UnixNano() / 1e3)
 	return l
@@ -135,8 +138,13 @@ func (l *AutoConcurrency) Remaining() uint64 {
 func (l *AutoConcurrency) Acquire() (Updater, error) {
 	now := time.Now()
 	if l.inflight.Inc() > l.maxConcurrency && l.CpuUsage() >= 500 {
-		l.inflight.Dec()
-		return nil, ErrReachLimitation
+		prevDrop := l.prevDropTime.Load()
+		nowDuration := time.Duration(now.Unix())
+		if l.CpuUsage() >= 500 || nowDuration-prevDrop <= time.Second {
+			l.inflight.Dec()
+			l.prevDropTime.CAS(prevDrop, nowDuration)
+			return nil, ErrReachLimitation
+		}
 	}
 
 	u := &AutoConcurrencyUpdater{
@@ -225,7 +233,7 @@ func (l *AutoConcurrency) Update(err error, latency int64, samplingTimeUs int64)
 	} else {
 		l.maxConcurrency /= 2
 	}
-	//l.Reset(samplingTimeUs)
+	l.Reset(samplingTimeUs)
 
 	logger.Debugf("[Auto Concurrency Limiter] Qps: %v, NoLoadLatency: %f, MaxConcurrency: %d, limiter: %+v",
 		l.maxQPS, l.noLoadLatency, l.maxConcurrency, l)
