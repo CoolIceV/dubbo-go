@@ -131,11 +131,9 @@ func (l *AutoConcurrency) Remaining() uint64 {
 
 func (l *AutoConcurrency) Acquire() (Updater, error) {
 	now := time.Now()
-	if l.inflight.Inc() > l.maxConcurrency {
-		if CpuUsage() >= 500 { // only when cpu load is above 50%
-			l.inflight.Dec()
-			return nil, ErrReachLimitation
-		}
+	if l.inflight.Inc() > l.maxConcurrency && CpuUsage() >= 500 { // only when cpu load is above 50%
+		l.inflight.Dec()
+		return nil, ErrReachLimitation
 	}
 	u := &AutoConcurrencyUpdater{
 		startTime: now,
@@ -192,8 +190,8 @@ func (l *AutoConcurrency) Update(latency int64, samplingTimeUs int64) {
 	}
 
 	if l.SampleCount > 0 {
-		qps := l.TotalReqCount.Load() / (samplingTimeUs - l.StartSampleTimeUs) * 1000000.0
-		l.updateQPS(float64(qps))
+		qps := float64(l.TotalReqCount.Load()) * 1000000.0 / float64(samplingTimeUs-l.StartSampleTimeUs)
+		l.updateQPS(qps)
 
 		avgLatency := l.TotalSampleUs / l.SampleCount
 		l.updateNoLoadLatency(float64(avgLatency))
