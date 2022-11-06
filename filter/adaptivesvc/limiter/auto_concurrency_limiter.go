@@ -86,7 +86,7 @@ func NewAutoConcurrencyLimiter() *AutoConcurrency {
 		emaFactor:            0.1,
 		noLoadLatency:        -1,
 		maxQPS:               -1,
-		maxConcurrency:       20,
+		maxConcurrency:       40,
 		HalfSampleIntervalMS: 25000,
 		ResetLatencyUs:       0,
 		inflight:             atomic.NewUint64(0),
@@ -139,7 +139,7 @@ func (l *AutoConcurrency) Acquire() (Updater, error) {
 		nowDuration := time.Duration(now.Unix())
 		if CpuUsage() >= 500 || nowDuration-prevDrop <= time.Second { // only when cpu load is above 50% or less than 1s since last drop
 			l.inflight.Dec()
-			l.prevDropTime.CAS(prevDrop, nowDuration)
+			l.prevDropTime.Store(nowDuration)
 			return nil, ErrReachLimitation
 		}
 	}
@@ -222,11 +222,13 @@ func (l *AutoConcurrency) Update(latency int64, samplingTimeUs int64) {
 		}
 		l.maxConcurrency = nextMaxConcurrency
 	} else {
-		// There may be no more data because the service is overloaded, reducing concurrency and maxConcurrency should be no less than 1
+		// There may be no more data because the service is overloaded, reducing concurrency
 		l.maxConcurrency /= 2
-		if l.maxConcurrency <= 0 {
-			l.maxConcurrency = 1
-		}
+	}
+
+	// maxConcurrency should be no less than 1
+	if l.maxConcurrency <= 0 {
+		l.maxConcurrency = 1
 	}
 
 	logger.Debugf("[Auto Concurrency Limiter] Qps: %v, NoLoadLatency: %f, MaxConcurrency: %d, limiter: %+v",
