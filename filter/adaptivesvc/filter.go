@@ -112,11 +112,11 @@ func (f *adaptiveServiceProviderFilter) OnResponse(_ context.Context, result pro
 		return result
 	}
 
-	if isErrAdaptiveSvcInterrupted(result.Error()) {
-		// If the Invoke method of the adaptiveServiceProviderFilter returns an error,
-		// the OnResponse of the adaptiveServiceProviderFilter should not be performed.
-		return result
-	}
+	//if isErrAdaptiveSvcInterrupted(result.Error()) {
+	//	// If the Invoke method of the adaptiveServiceProviderFilter returns an error,
+	//	// the OnResponse of the adaptiveServiceProviderFilter should not be performed.
+	//	return result
+	//}
 
 	// get updater from the attributes
 	updaterIface, _ := invocation.GetAttribute(constant.AdaptiveServiceUpdaterKey)
