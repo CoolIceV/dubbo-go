@@ -48,8 +48,6 @@ type AutoConcurrency struct {
 	TotalSampleUs      int64
 	TotalReqCount      *atomic.Int64
 
-	prevDropTime *atomic.Duration
-
 	inflight *atomic.Uint64
 }
 
@@ -92,7 +90,6 @@ func NewAutoConcurrencyLimiter() *AutoConcurrency {
 		inflight:             atomic.NewUint64(0),
 		LastSamplingTimeUs:   atomic.NewInt64(0),
 		TotalReqCount:        atomic.NewInt64(0),
-		prevDropTime:         atomic.NewDuration(0),
 	}
 	l.RemeasureStartUs = l.NextResetTime(time.Now().UnixNano() / 1e3)
 	return l
@@ -135,15 +132,11 @@ func (l *AutoConcurrency) Remaining() uint64 {
 func (l *AutoConcurrency) Acquire() (Updater, error) {
 	now := time.Now()
 	if l.inflight.Inc() > l.maxConcurrency {
-		prevDrop := l.prevDropTime.Load()
-		nowDuration := time.Duration(now.Unix())
-		if CpuUsage() >= 500 || nowDuration-prevDrop <= time.Second { // only when cpu load is above 50% or less than 1s since last drop
+		if CpuUsage() >= 500 { // only when cpu load is above 50%
 			l.inflight.Dec()
-			l.prevDropTime.Store(nowDuration)
 			return nil, ErrReachLimitation
 		}
 	}
-
 	u := &AutoConcurrencyUpdater{
 		startTime: now,
 		limiter:   l,
