@@ -19,6 +19,7 @@ var (
 	cpuLoad *atomic.Uint64 = atomic.NewUint64(0) // 0-1000
 )
 
+// These parameters may need to be different between services
 const (
 	MaxExploreRatio    = 0.3
 	MinExploreRatio    = 0.06
@@ -31,12 +32,12 @@ const (
 type AutoConcurrency struct {
 	sync.RWMutex
 
-	ExploreRatio   float64
-	emaFactor      float64
-	noLoadLatency  float64 //duration
-	maxQPS         float64
-	HalfIntervalMS int64
-	maxConcurrency uint64
+	ExploreRatio         float64
+	emaFactor            float64
+	noLoadLatency        float64 //duration
+	maxQPS               float64
+	HalfSampleIntervalMS int64
+	maxConcurrency       uint64
 
 	// metrics of the current round
 	StartSampleTimeUs  int64
@@ -81,17 +82,17 @@ func CpuUsage() uint64 {
 
 func NewAutoConcurrencyLimiter() *AutoConcurrency {
 	l := &AutoConcurrency{
-		ExploreRatio:       MaxExploreRatio,
-		emaFactor:          0.1,
-		noLoadLatency:      -1,
-		maxQPS:             -1,
-		maxConcurrency:     20,
-		HalfIntervalMS:     25000,
-		ResetLatencyUs:     0,
-		inflight:           atomic.NewUint64(0),
-		LastSamplingTimeUs: atomic.NewInt64(0),
-		TotalReqCount:      atomic.NewInt64(0),
-		prevDropTime:       atomic.NewDuration(0),
+		ExploreRatio:         MaxExploreRatio,
+		emaFactor:            0.1,
+		noLoadLatency:        -1,
+		maxQPS:               -1,
+		maxConcurrency:       20,
+		HalfSampleIntervalMS: 25000,
+		ResetLatencyUs:       0,
+		inflight:             atomic.NewUint64(0),
+		LastSamplingTimeUs:   atomic.NewInt64(0),
+		TotalReqCount:        atomic.NewInt64(0),
+		prevDropTime:         atomic.NewDuration(0),
 	}
 	l.RemeasureStartUs = l.NextResetTime(time.Now().UnixNano() / 1e3)
 	return l
@@ -158,7 +159,7 @@ func (l *AutoConcurrency) Reset(startTimeUs int64) {
 }
 
 func (l *AutoConcurrency) NextResetTime(samplingTimeUs int64) int64 {
-	return samplingTimeUs + (l.HalfIntervalMS+rand.Int63n(l.HalfIntervalMS))*1000
+	return samplingTimeUs + (l.HalfSampleIntervalMS+rand.Int63n(l.HalfSampleIntervalMS))*1000
 }
 
 func (l *AutoConcurrency) Update(latency int64, samplingTimeUs int64) {
