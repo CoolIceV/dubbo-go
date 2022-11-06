@@ -134,7 +134,7 @@ func NewHillClimbingUpdater(limiter *HillClimbing) *HillClimbingUpdater {
 	return u
 }
 
-func (u *HillClimbingUpdater) DoUpdate(err error) error {
+func (u *HillClimbingUpdater) DoUpdate() error {
 	defer func() {
 		u.limiter.inflight.Dec()
 	}()

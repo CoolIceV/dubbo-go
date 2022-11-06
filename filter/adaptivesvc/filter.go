@@ -112,11 +112,11 @@ func (f *adaptiveServiceProviderFilter) OnResponse(_ context.Context, result pro
 		return result
 	}
 
-	//if isErrAdaptiveSvcInterrupted(result.Error()) {
-	//	// If the Invoke method of the adaptiveServiceProviderFilter returns an error,
-	//	// the OnResponse of the adaptiveServiceProviderFilter should not be performed.
-	//	return result
-	//}
+	if isErrAdaptiveSvcInterrupted(result.Error()) {
+		// If the Invoke method of the adaptiveServiceProviderFilter returns an error,
+		// the OnResponse of the adaptiveServiceProviderFilter should not be performed.
+		return result
+	}
 
 	// get updater from the attributes
 	updaterIface, _ := invocation.GetAttribute(constant.AdaptiveServiceUpdaterKey)
@@ -131,7 +131,7 @@ func (f *adaptiveServiceProviderFilter) OnResponse(_ context.Context, result pro
 		return &protocol.RPCResult{Err: ErrUnexpectedUpdaterType}
 	}
 
-	err := updater.DoUpdate(result.Error())
+	err := updater.DoUpdate()
 	if err != nil {
 		logger.Errorf("[adasvc filter] The DoUpdate method was failed, err: %s.", err)
 		return &protocol.RPCResult{Err: err}
@@ -144,9 +144,6 @@ func (f *adaptiveServiceProviderFilter) OnResponse(_ context.Context, result pro
 		return &protocol.RPCResult{Err: err}
 	}
 
-	// set attachments to inform consumer of provider status
-	result.AddAttachment(constant.AdaptiveServiceRemainingKey, fmt.Sprintf("%d", l.Remaining()))
-	result.AddAttachment(constant.AdaptiveServiceInflightKey, fmt.Sprintf("%d", l.Inflight()))
 	logger.Debugf("[adasvc filter] The attachments are set, %s: %d, %s: %d.",
 		constant.AdaptiveServiceRemainingKey, l.Remaining(),
 		constant.AdaptiveServiceInflightKey, l.Inflight())

@@ -14,10 +14,9 @@ import (
 )
 
 var (
-	_     Limiter        = (*AutoConcurrency)(nil)
-	_     Updater        = (*AutoConcurrencyUpdater)(nil)
-	gCPU  *atomic.Uint64 = atomic.NewUint64(0)
-	decay                = 0.95
+	_       Limiter        = (*AutoConcurrency)(nil)
+	_       Updater        = (*AutoConcurrencyUpdater)(nil)
+	cpuLoad *atomic.Uint64 = atomic.NewUint64(0) // 0-1000
 )
 
 const (
@@ -26,7 +25,7 @@ const (
 	SampleWindowSizeMs = 1000
 	MinSampleCount     = 40
 	MaxSampleCount     = 500
-	FailPunishRatio    = 1.0
+	CpuDecay           = 0.95
 )
 
 type AutoConcurrency struct {
@@ -38,22 +37,19 @@ type AutoConcurrency struct {
 	maxQPS         float64
 	HalfIntervalMS int64
 	maxConcurrency uint64
-	//CorrectionFactor float64
+
 	// metrics of the current round
-	StartTimeUs        int64
+	StartSampleTimeUs  int64
 	LastSamplingTimeUs *atomic.Int64
-	ResetLatencyUs     int64
-	RemeasureStartUs   int64
-
-	SuccessCount   int64
-	FailCount      int64
-	TotalSuccessUs int64
-	TotalFailUs    int64
-	TotalSuccReq   *atomic.Int64
-
-	inflight *atomic.Uint64
+	ResetLatencyUs     int64 // time to reset noLoadLatency
+	RemeasureStartUs   int64 //time to reset req data (SampleCount, TotalSampleUs, TotalReqCount)
+	SampleCount        int64
+	TotalSampleUs      int64
+	TotalReqCount      *atomic.Int64
 
 	prevDropTime *atomic.Duration
+
+	inflight *atomic.Uint64
 }
 
 func init() {
@@ -72,15 +68,15 @@ func cpuproc() {
 
 	for range ticker.C {
 		usage := cpu.CpuUsage()
-		prevCPU := gCPU.Load()
-		curCPU := uint64(float64(prevCPU)*decay + float64(usage)*(1.0-decay))
+		prevCPU := cpuLoad.Load()
+		curCPU := uint64(float64(prevCPU)*CpuDecay + float64(usage)*(1.0-CpuDecay))
 		logger.Debugf("current cpu usage: %d", curCPU)
-		gCPU.Store(curCPU)
+		cpuLoad.Store(curCPU)
 	}
 }
 
-func (l *AutoConcurrency) CpuUsage() uint64 {
-	return gCPU.Load()
+func CpuUsage() uint64 {
+	return cpuLoad.Load()
 }
 
 func NewAutoConcurrencyLimiter() *AutoConcurrency {
@@ -89,12 +85,12 @@ func NewAutoConcurrencyLimiter() *AutoConcurrency {
 		emaFactor:          0.1,
 		noLoadLatency:      -1,
 		maxQPS:             -1,
-		maxConcurrency:     40,
+		maxConcurrency:     20,
 		HalfIntervalMS:     25000,
 		ResetLatencyUs:     0,
 		inflight:           atomic.NewUint64(0),
 		LastSamplingTimeUs: atomic.NewInt64(0),
-		TotalSuccReq:       atomic.NewInt64(0),
+		TotalReqCount:      atomic.NewInt64(0),
 		prevDropTime:       atomic.NewDuration(0),
 	}
 	l.RemeasureStartUs = l.NextResetTime(time.Now().UnixNano() / 1e3)
@@ -137,10 +133,10 @@ func (l *AutoConcurrency) Remaining() uint64 {
 
 func (l *AutoConcurrency) Acquire() (Updater, error) {
 	now := time.Now()
-	if l.inflight.Inc() > l.maxConcurrency && l.CpuUsage() >= 500 {
+	if l.inflight.Inc() > l.maxConcurrency {
 		prevDrop := l.prevDropTime.Load()
 		nowDuration := time.Duration(now.Unix())
-		if l.CpuUsage() >= 500 || nowDuration-prevDrop <= time.Second {
+		if CpuUsage() >= 500 || nowDuration-prevDrop <= time.Second { // only when cpu load is above 50% or less than 1s since last drop
 			l.inflight.Dec()
 			l.prevDropTime.CAS(prevDrop, nowDuration)
 			return nil, ErrReachLimitation
@@ -155,22 +151,20 @@ func (l *AutoConcurrency) Acquire() (Updater, error) {
 }
 
 func (l *AutoConcurrency) Reset(startTimeUs int64) {
-	l.StartTimeUs = startTimeUs
-	l.SuccessCount = 0
-	l.FailCount = 0
-	l.TotalFailUs = 0
-	l.TotalSuccessUs = 0
-	l.TotalSuccReq.Store(0)
+	l.StartSampleTimeUs = startTimeUs
+	l.SampleCount = 0
+	l.TotalSampleUs = 0
+	l.TotalReqCount.Store(0)
 }
 
 func (l *AutoConcurrency) NextResetTime(samplingTimeUs int64) int64 {
 	return samplingTimeUs + (l.HalfIntervalMS+rand.Int63n(l.HalfIntervalMS))*1000
 }
 
-func (l *AutoConcurrency) Update(err error, latency int64, samplingTimeUs int64) {
+func (l *AutoConcurrency) Update(latency int64, samplingTimeUs int64) {
 	l.Lock()
 	defer l.Unlock()
-	if l.ResetLatencyUs != 0 {
+	if l.ResetLatencyUs != 0 { // wait to reset noLoadLatency and other data
 		if l.ResetLatencyUs > samplingTimeUs {
 			return
 		}
@@ -180,47 +174,44 @@ func (l *AutoConcurrency) Update(err error, latency int64, samplingTimeUs int64)
 		l.Reset(samplingTimeUs)
 	}
 
-	if l.StartTimeUs == 0 {
-		l.StartTimeUs = samplingTimeUs
+	if l.StartSampleTimeUs == 0 {
+		l.StartSampleTimeUs = samplingTimeUs
 	}
 
-	if err != nil {
-		l.FailCount++
-		l.TotalFailUs += latency
-	} else {
-		l.SuccessCount++
-		l.TotalSuccessUs += latency
-	}
+	l.SampleCount++
+	l.TotalSampleUs += latency
 
-	logger.Debugf("[Auto Concurrency Limiter Test] samplingTimeUs: %v, StartTimeUs: %v", samplingTimeUs, l.StartTimeUs)
+	logger.Debugf("[Auto Concurrency Limiter Test] samplingTimeUs: %v, StartSampleTimeUs: %v", samplingTimeUs, l.StartSampleTimeUs)
 
-	if l.SuccessCount+l.FailCount < MinSampleCount {
-		if samplingTimeUs-l.StartTimeUs >= SampleWindowSizeMs*1000 {
+	if l.SampleCount < MinSampleCount {
+		if samplingTimeUs-l.StartSampleTimeUs >= SampleWindowSizeMs*1000 { // QPS is too small
 			l.Reset(samplingTimeUs)
 		}
 		return
 	}
 
-	logger.Debugf("[Auto Concurrency Limiter Test] samplingTimeUs: %v, StartTimeUs: %v", samplingTimeUs, l.StartTimeUs)
+	logger.Debugf("[Auto Concurrency Limiter Test] samplingTimeUs: %v, StartSampleTimeUs: %v", samplingTimeUs, l.StartSampleTimeUs)
 
-	if samplingTimeUs-l.StartTimeUs < SampleWindowSizeMs*1000 && l.SuccessCount+l.FailCount < MaxSampleCount {
+	// sampling time is too short. If sample count is bigger than MaxSampleCount, just update.
+	if samplingTimeUs-l.StartSampleTimeUs < SampleWindowSizeMs*1000 && l.SampleCount < MaxSampleCount {
 		return
 	}
 
-	if l.SuccessCount > 0 {
-		totalSuccReq := l.TotalSuccReq.Load()
-		avgLatency := (l.TotalFailUs*FailPunishRatio + l.TotalSuccessUs) / l.SuccessCount
-		qps := 1000000.0 * totalSuccReq / (samplingTimeUs - l.StartTimeUs)
+	if l.SampleCount > 0 {
+		qps := l.TotalReqCount.Load() / (samplingTimeUs - l.StartSampleTimeUs) * 1000000.0
 		l.updateQPS(float64(qps))
+
+		avgLatency := l.TotalSampleUs / l.SampleCount
 		l.updateNoLoadLatency(float64(avgLatency))
-		logger.Debugf("[Auto Concurrency Limiter] success count: %v, fail count: %v, limiter: %+v", l.SuccessCount, l.FailCount, l)
+
 		nextMaxConcurrency := uint64(0)
-		if l.RemeasureStartUs <= samplingTimeUs {
+		if l.RemeasureStartUs <= samplingTimeUs { // should reset
 			l.Reset(samplingTimeUs)
 			l.ResetLatencyUs = samplingTimeUs + avgLatency*2
 			nextMaxConcurrency = uint64(math.Ceil(l.maxQPS * l.noLoadLatency * 0.9 / 1000000))
 		} else {
-			if float64(avgLatency) <= l.noLoadLatency*(1.0+MinExploreRatio) &&
+			// use explore ratio to adjust MaxConcurrency. [Conditions may need to be reconsidered] !!!
+			if float64(avgLatency) <= l.noLoadLatency*(1.0+MinExploreRatio) ||
 				float64(qps) >= l.maxQPS*(1.0+MinExploreRatio) {
 				l.ExploreRatio = math.Min(MaxExploreRatio, l.ExploreRatio+0.02)
 			} else {
@@ -230,12 +221,19 @@ func (l *AutoConcurrency) Update(err error, latency int64, samplingTimeUs int64)
 		}
 		l.maxConcurrency = nextMaxConcurrency
 	} else {
+		// There may be no more data because the service is overloaded, reducing concurrency and maxConcurrency should be no less than 1
 		l.maxConcurrency /= 2
+		if l.maxConcurrency <= 0 {
+			l.maxConcurrency = 1
+		}
 	}
-	l.Reset(samplingTimeUs)
 
 	logger.Debugf("[Auto Concurrency Limiter] Qps: %v, NoLoadLatency: %f, MaxConcurrency: %d, limiter: %+v",
 		l.maxQPS, l.noLoadLatency, l.maxConcurrency, l)
+
+	// Update completed, resample
+	l.Reset(samplingTimeUs)
+
 }
 
 type AutoConcurrencyUpdater struct {
@@ -243,13 +241,11 @@ type AutoConcurrencyUpdater struct {
 	limiter   *AutoConcurrency
 }
 
-func (u *AutoConcurrencyUpdater) DoUpdate(err error) error {
+func (u *AutoConcurrencyUpdater) DoUpdate() error {
 	defer func() {
 		u.limiter.inflight.Dec()
 	}()
-	if err == nil {
-		u.limiter.TotalSuccReq.Add(1)
-	}
+	u.limiter.TotalReqCount.Add(1)
 	now := time.Now().UnixNano() / 1e3
 	lastSamplingTimeUs := u.limiter.LastSamplingTimeUs.Load()
 	if lastSamplingTimeUs == 0 || now-lastSamplingTimeUs >= 100 {
@@ -257,7 +253,7 @@ func (u *AutoConcurrencyUpdater) DoUpdate(err error) error {
 		if sample {
 			logger.Debugf("[Auto Concurrency Updater] sample, %v, %v", u.limiter.ResetLatencyUs, u.limiter.RemeasureStartUs)
 			latency := now - u.startTime.UnixNano()/1e3
-			u.limiter.Update(err, latency, now)
+			u.limiter.Update(latency, now)
 		}
 	}
 
